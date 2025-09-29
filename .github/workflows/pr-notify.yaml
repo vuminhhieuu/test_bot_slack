@@ -1,0 +1,109 @@
+name: PR Notifications to Slack
+
+on:
+  pull_request:
+    types: [closed]
+  issue_comment:
+    types: [created]
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+
+      # --- STEP 1: Lấy thread_ts nếu đã lưu ---
+      - name: Get existing thread_ts
+        id: get-thread
+        run: |
+          ts=$(gh api repos/${{ github.repository }}/issues/${{ github.event.issue.number || github.event.pull_request.number }}/comments \
+            --jq '.[] | select(.body | contains("slack-thread-ts")) | .body' | sed -n 's/.*slack-thread-ts:\(.*\)-->.*/\1/p' | tail -n1)
+          echo "thread_ts=$ts" >> $GITHUB_ENV
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # --- STEP 2: Khi Dev comment READY ---
+      - name: Notify PR Ready
+        if: github.event_name == 'issue_comment' && startsWith(github.event.comment.body, 'ready')
+        id: ready
+        run: |
+          body="${{ github.event.comment.body }}"
+          mentions=$(echo "$body" | grep -o '@[a-zA-Z0-9._-]\+' | tr '\n' ' ')
+
+          ts=$(curl -s -X POST \
+            -H "Authorization: Bearer $SLACK_BOT_TOKEN" \
+            -H 'Content-type: application/json' \
+            --data "{
+              \"channel\": \"${SLACK_CHANNEL_ID}\",
+              \"text\": \"👀 PR Ready for Review $mentions\",
+              \"blocks\": [
+                {
+                  \"type\": \"section\",
+                  \"text\": {
+                    \"type\": \"mrkdwn\",
+                    \"text\": \"*${{ github.event.issue.title }}*\nAuthor: ${{ github.event.comment.user.login }}\nReviewers1: <$mentions>\n\nReviewers2: <!here> <@U09JAT0TSJU>\n<${{ github.event.issue.html_url }}|View PR>\"
+                  }
+                }
+              ]
+            }" https://slack.com/api/chat.postMessage | jq -r '.ts')
+
+          echo "thread_ts=$ts" >> $GITHUB_ENV
+
+          # Lưu thread_ts vào issue comment ẩn
+          gh api repos/${{ github.repository }}/issues/${{ github.event.issue.number }}/comments \
+            -f body="<!-- slack-thread-ts:$ts -->"
+        env:
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          SLACK_CHANNEL_ID: ${{ secrets.SLACK_CHANNEL_ID }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # --- STEP 3: Khi Reviewer comment "comment ..." ---
+      - name: Notify Reviewer Feedback
+        if: github.event_name == 'issue_comment' && contains(github.event.comment.body, 'comment')
+        run: |
+          curl -s -X POST \
+            -H "Authorization: Bearer $SLACK_BOT_TOKEN" \
+            -H 'Content-type: application/json' \
+            --data "{
+              \"channel\": \"${SLACK_CHANNEL_ID}\",
+              \"text\": \"📝 Review Feedback\",
+              \"blocks\": [
+                {
+                  \"type\": \"section\",
+                  \"text\": {
+                    \"type\": \"mrkdwn\",
+                    \"text\": \"Reviewer: ${{ github.event.comment.user.login }}\n💬 ${{ github.event.comment.body }}\n<${{ github.event.issue.html_url }}|View Discussion>\"
+                  }
+                }
+              ],
+              \"thread_ts\": \"${{ env.thread_ts }}\"
+            }" https://slack.com/api/chat.postMessage
+        env:
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          SLACK_CHANNEL_ID: ${{ secrets.SLACK_CHANNEL_ID }}
+
+      # --- STEP 4: Khi PR merged ---
+      - name: Notify PR Merged
+        if: github.event_name == 'pull_request' && github.event.action == 'closed' && github.event.pull_request.merged == true
+        run: |
+          curl -s -X POST \
+            -H "Authorization: Bearer $SLACK_BOT_TOKEN" \
+            -H 'Content-type: application/json' \
+            --data "{
+              \"channel\": \"${SLACK_CHANNEL_ID}\",
+              \"text\": \"🎉 PR Merged\",
+              \"blocks\": [
+                {
+                  \"type\": \"section\",
+                  \"text\": {
+                    \"type\": \"mrkdwn\",
+                    \"text\": \"*${{ github.event.pull_request.title }}*\nMerged by: ${{ github.event.pull_request.merged_by.login }}\n<${{ github.event.pull_request.html_url }}|View PR>\"
+                  }
+                }
+              ],
+              \"thread_ts\": \"${{ env.thread_ts }}\"
+            }" https://slack.com/api/chat.postMessage
+        env:
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          SLACK_CHANNEL_ID: ${{ secrets.SLACK_CHANNEL_ID }}
