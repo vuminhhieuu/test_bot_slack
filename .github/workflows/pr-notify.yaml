@@ -69,21 +69,40 @@ jobs:
       - name: Notify Reviewer Feedback
         if: github.event_name == 'issue_comment' && contains(github.event.comment.body, 'comment')
         run: |
+          # Lấy thread_ts đã lưu trong PR comment
           ts=$(gh api repos/${{ github.repository }}/issues/${{ github.event.issue.number }}/comments \
             --jq '.[] | select(.body | contains("slack-thread-ts")) | .body' | sed -n 's/.*slack-thread-ts:\(.*\)-->.*/\1/p' | tail -n1)
 
+          # Lấy Slack ID của PR author
+          pr_author="${{ github.event.issue.user.login }}"
+          author_id=$(jq -r --arg user "$pr_author" '.[$user]' usermap.json)
+
+          # Lấy Slack ID của reviewer (người comment)
+          reviewer="${{ github.event.comment.user.login }}"
+          reviewer_id=$(jq -r --arg user "$reviewer" '.[$user]' usermap.json)
+
+          # Tạo mention list
+          mentions=""
+          if [ "$author_id" != "null" ]; then
+            mentions="$mentions <@$author_id>"
+          fi
+          if [ "$reviewer_id" != "null" ]; then
+            mentions="$mentions <@$reviewer_id>"
+          fi
+
+          # Gửi reply vào thread
           curl -s -X POST \
             -H "Authorization: Bearer $SLACK_BOT_TOKEN" \
             -H 'Content-type: application/json' \
             --data "{
               \"channel\": \"${SLACK_CHANNEL_ID}\",
-              \"text\": \"📝 Review Feedback\",
+              \"text\": \"📝 Review Feedback $mentions\",
               \"blocks\": [
                 {
                   \"type\": \"section\",
                   \"text\": {
                     \"type\": \"mrkdwn\",
-                    \"text\": \"Reviewer: ${{ github.event.comment.user.login }}\n💬 ${{ github.event.comment.body }}\n<${{ github.event.issue.html_url }}|View Discussion>\"
+                    \"text\": \"Reviewer: $reviewer\n💬 ${{ github.event.comment.body }}\n<${{ github.event.issue.html_url }}|View Discussion>\"
                   }
                 }
               ],
