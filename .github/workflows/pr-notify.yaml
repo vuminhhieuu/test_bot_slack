@@ -65,7 +65,7 @@ jobs:
           SLACK_CHANNEL_ID: ${{ secrets.SLACK_CHANNEL_ID }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      # --- Khi Reviewer comment "comment ..." ---
+       # --- Khi Reviewer comment "comment ..." ---
       - name: Notify Reviewer Feedback
         if: github.event_name == 'issue_comment' && contains(github.event.comment.body, 'comment')
         run: |
@@ -90,7 +90,7 @@ jobs:
             mentions="$mentions <@$reviewer_id>"
           fi
 
-          # Gửi reply vào thread
+          # Gửi reply vào thread, có mentions
           curl -s -X POST \
             -H "Authorization: Bearer $SLACK_BOT_TOKEN" \
             -H 'Content-type: application/json' \
@@ -102,7 +102,7 @@ jobs:
                   \"type\": \"section\",
                   \"text\": {
                     \"type\": \"mrkdwn\",
-                    \"text\": \"Reviewer: $reviewer\n💬 ${{ github.event.comment.body }}\n<${{ github.event.issue.html_url }}|View Discussion>\"
+                    \"text\": \"Reviewer: $reviewer\n💬 ${{ github.event.comment.body }}\n$mentions\n<${{ github.event.issue.html_url }}|View Discussion>\"
                   }
                 }
               ],
