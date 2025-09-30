@@ -1,10 +1,10 @@
 name: PR Notifications to Slack
 
 on:
-  pull_request:
-    types: [opened, ready_for_review, closed]
   issue_comment:
     types: [created]
+  pull_request:
+    types: [closed]
 
 jobs:
   notify:
@@ -13,59 +13,151 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v3
 
-      # Lưu Slack user map vào file JSON
       - name: Save Slack user map
         run: echo '${{ secrets.SLACK_USER_MAP }}' > usermap.json
 
-      # Helper script để map GitHub username sang Slack ID
-      - name: Create helper script
-        run: |
-          cat << 'EOF' > map_user.sh
-          #!/usr/bin/env bash
-          user="$1"
-          id=$(jq -r --arg u "$user" '.[$u]' usermap.json)
-          if [ "$id" != "null" ]; then
-            echo "<@$id>"
-          else
-            echo "@$user"
-          fi
-          EOF
-          chmod +x map_user.sh
-
-      # Ready (khi comment có từ ready)
+      # --- Khi Dev comment READY ---
       - name: Notify PR Ready
-        if: github.event.issue.pull_request && contains(github.event.comment.body, 'ready')
+        if: github.event_name == 'issue_comment' && startsWith(github.event.comment.body, 'ready')
         run: |
-          reviewers=$(echo "${{ github.event.comment.body }}" | grep -o '@[a-zA-Z0-9._-]\+' | tr -d '@')
-          mentions=""
-          for r in $reviewers; do
-            mentions="$mentions $(./map_user.sh $r)"
-          done
-          text=":eyes: *PR Ready for Review*\n*${{ github.event.issue.title }}*\nAuthor: $(./map_user.sh ${{ github.event.comment.user.login }})\nReviewers:$mentions\n:link: <${{ github.event.issue.html_url }}|View PR>"
-          response=$(curl -s -X POST -H 'Content-type: application/json' \
-            --data "{\"channel\":\"#pull-request-status-checking\",\"text\":\"$text\"}" \
-            ${{ secrets.SLACK_WEBHOOK_URL }})
-          echo "THREAD_TS=$(echo $response | jq -r '.ts')" >> $GITHUB_ENV
+          build_mentions() {
+            mentions=""
+            for u in "$@"; do
+              slack_id=$(jq -r --arg user "$u" '.[$user]' usermap.json)
+              if [ "$slack_id" != "null" ]; then
+                mentions="$mentions <@$slack_id>"
+              else
+                mentions="$mentions @$u"
+              fi
+            done
+            echo "$mentions"
+          }
 
-      # Comment thông thường
-      - name: Notify Reviewer Comment
-        if: github.event.issue.pull_request && !contains(github.event.comment.body, 'ready')
+          body="${{ github.event.comment.body }}"
+          reviewers=$(echo "$body" | grep -o '@[a-zA-Z0-9._-]\+' | tr -d '@')
+          mentions=$(build_mentions $reviewers)
+          author=$(build_mentions ${{ github.event.comment.user.login }})
+
+          ts=$(curl -s -X POST \
+            -H "Authorization: Bearer $SLACK_BOT_TOKEN" \
+            -H 'Content-type: application/json' \
+            --data "{
+              \"channel\": \"${SLACK_CHANNEL_ID}\",
+              \"text\": \":eyes: PR Ready for Review $mentions\",
+              \"blocks\": [
+                {
+                  \"type\": \"section\",
+                  \"text\": {
+                    \"type\": \"mrkdwn\",
+                    \"text\": \"*${{ github.event.issue.title }}*\nAuthor: $author\nReviewers: $mentions\n:link: <${{ github.event.issue.html_url }}|View PR>\"
+                  }
+                }
+              ]
+            }" https://slack.com/api/chat.postMessage | jq -r '.ts')
+
+          echo "thread_ts=$ts" >> $GITHUB_ENV
+
+          gh api repos/${{ github.repository }}/issues/${{ github.event.issue.number }}/comments \
+            -f body="<!-- slack-thread-ts:$ts -->"
+        env:
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          SLACK_CHANNEL_ID: ${{ secrets.SLACK_CHANNEL_ID }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # --- Khi Reviewer comment "comment ..." ---
+      - name: Notify Reviewer Feedback
+        if: github.event_name == 'issue_comment' && startsWith(github.event.comment.body, 'comment')
         run: |
-          mentions=""
-          reviewers=$(echo "${{ github.event.comment.body }}" | grep -o '@[a-zA-Z0-9._-]\+' | tr -d '@')
-          for r in $reviewers; do
-            mentions="$mentions $(./map_user.sh $r)"
-          done
-          text=":speech_balloon: *New Comment on PR*\n*${{ github.event.issue.title }}*\nBy: $(./map_user.sh ${{ github.event.comment.user.login }})\nComment: ${{ github.event.comment.body }}\nMentions:$mentions\n:link: <${{ github.event.comment.html_url }}|View Comment>"
-          curl -s -X POST -H 'Content-type: application/json' \
-            --data "{\"channel\":\"#pull-request-status-checking\",\"text\":\"$text\",\"thread_ts\":\"${{ env.THREAD_TS }}\"}" \
-            ${{ secrets.SLACK_WEBHOOK_URL }}
+          build_mentions() {
+            mentions=""
+            for u in "$@"; do
+              slack_id=$(jq -r --arg user "$u" '.[$user]' usermap.json)
+              if [ "$slack_id" != "null" ]; then
+                mentions="$mentions <@$slack_id>"
+              else
+                mentions="$mentions @$u"
+              fi
+            done
+            echo "$mentions"
+          }
 
-      # Khi merge
+          ts=$(gh api repos/${{ github.repository }}/issues/${{ github.event.issue.number }}/comments \
+            --jq '.[] | select(.body | contains("slack-thread-ts")) | .body' | \
+            sed -n 's/.*slack-thread-ts:\(.*\)-->.*/\1/p' | tail -n1)
+
+          pr_author="${{ github.event.issue.user.login }}"
+          reviewer="${{ github.event.comment.user.login }}"
+          assignees=$(gh api repos/${{ github.repository }}/issues/${{ github.event.issue.number }} --jq '.assignees[].login')
+
+          mentions=$(build_mentions $pr_author $reviewer $assignees)
+
+          curl -s -X POST \
+            -H "Authorization: Bearer $SLACK_BOT_TOKEN" \
+            -H 'Content-type: application/json' \
+            --data "{
+              \"channel\": \"${SLACK_CHANNEL_ID}\",
+              \"thread_ts\": \"$ts\",
+              \"text\": \":speech_balloon: New comment from *$reviewer* $mentions\",
+              \"blocks\": [
+                {
+                  \"type\": \"section\",
+                  \"text\": {
+                    \"type\": \"mrkdwn\",
+                    \"text\": \"*$reviewer* commented on the PR:\n>>> ${{ github.event.comment.body }}\n$mentions\n:link: <${{ github.event.comment.html_url }}|View Comment>\"
+                  }
+                }
+              ]
+            }" https://slack.com/api/chat.postMessage
+        env:
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          SLACK_CHANNEL_ID: ${{ secrets.SLACK_CHANNEL_ID }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # --- Khi PR được merged ---
       - name: Notify Merge
         if: github.event.pull_request.merged == true
         run: |
-          text=":white_check_mark: *PR Merged*\n*${{ github.event.pull_request.title }}*\nAuthor: $(./map_user.sh ${{ github.event.pull_request.user.login }})\nMerged by: $(./map_user.sh $GITHUB_ACTOR)\n:link: <${{ github.event.pull_request.html_url }}|View PR>"
-          curl -s -X POST -H 'Content-type: application/json' \
-            --data "{\"channel\":\"#pull-request-status-checking\",\"text\":\"$text\",\"thread_ts\":\"${{ env.THREAD_TS }}\"}" \
-            ${{ secrets.SLACK_WEBHOOK_URL }}
+          build_mentions() {
+            mentions=""
+            for u in "$@"; do
+              slack_id=$(jq -r --arg user "$u" '.[$user]' usermap.json)
+              if [ "$slack_id" != "null" ]; then
+                mentions="$mentions <@$slack_id>"
+              else
+                mentions="$mentions @$u"
+              fi
+            done
+            echo "$mentions"
+          }
+
+          ts=$(gh api repos/${{ github.repository }}/issues/${{ github.event.pull_request.number }}/comments \
+            --jq '.[] | select(.body | contains("slack-thread-ts")) | .body' | \
+            sed -n 's/.*slack-thread-ts:\(.*\)-->.*/\1/p' | tail -n1)
+
+          pr_author="${{ github.event.pull_request.user.login }}"
+          merger="${{ github.event.pull_request.merged_by.login }}"
+          assignees=$(gh api repos/${{ github.repository }}/issues/${{ github.event.pull_request.number }} --jq '.assignees[].login')
+
+          mentions=$(build_mentions $pr_author $merger $assignees)
+
+          curl -s -X POST \
+            -H "Authorization: Bearer $SLACK_BOT_TOKEN" \
+            -H 'Content-type: application/json' \
+            --data "{
+              \"channel\": \"${SLACK_CHANNEL_ID}\",
+              \"thread_ts\": \"$ts\",
+              \"text\": \":white_check_mark: PR has been merged! <!channel> $mentions\",
+              \"blocks\": [
+                {
+                  \"type\": \"section\",
+                  \"text\": {
+                    \"type\": \"mrkdwn\",
+                    \"text\": \"*${{ github.event.pull_request.title }}* has been merged!\nAuthor: $pr_author\nMerged by: $merger\n$mentions\n:link: <${{ github.event.pull_request.html_url }}|View PR>\"
+                  }
+                }
+              ]
+            }" https://slack.com/api/chat.postMessage
+        env:
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          SLACK_CHANNEL_ID: ${{ secrets.SLACK_CHANNEL_ID }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
