@@ -13,30 +13,39 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v3
 
-      - name: Load Slack user map
-        id: usermap
+      - name: Save Slack user map
+        run: echo '${{ secrets.SLACK_USER_MAP }}' > usermap.json
+
+      # Helper script để build mentions
+      - name: Create build_mentions.sh
         run: |
-          echo '${{ secrets.SLACK_USER_MAP }}' > usermap.json
+          cat <<'EOF' > build_mentions.sh
+          #!/usr/bin/env bash
+          build_mentions() {
+            users=("$@")
+            mentions=""
+            for u in "${users[@]}"; do
+              slack_id=$(jq -r --arg user "$u" '.[$user]' usermap.json)
+              if [ "$slack_id" != "null" ]; then
+                mentions="$mentions <@$slack_id>"
+              else
+                mentions="$mentions @$u"
+              fi
+            done
+            echo "$mentions"
+          }
+          EOF
+          chmod +x build_mentions.sh
 
       # --- Khi Dev comment READY ---
       - name: Notify PR Ready
         if: github.event_name == 'issue_comment' && startsWith(github.event.comment.body, 'ready')
-        id: ready
         run: |
+          source build_mentions.sh
+
           body="${{ github.event.comment.body }}"
-
-          # Tách reviewer từ comment (vd: "ready @alice @bob")
           reviewers=$(echo "$body" | grep -o '@[a-zA-Z0-9._-]\+' | tr -d '@')
-
-          mentions=""
-          for r in $reviewers; do
-            slack_id=$(jq -r --arg user "$r" '.[$user]' usermap.json)
-            if [ "$slack_id" != "null" ]; then
-              mentions="$mentions <@$slack_id>"
-            else
-              mentions="$mentions @$r"
-            fi
-          done
+          mentions=$(build_mentions $reviewers)
 
           ts=$(curl -s -X POST \
             -H "Authorization: Bearer $SLACK_BOT_TOKEN" \
@@ -57,7 +66,6 @@ jobs:
 
           echo "thread_ts=$ts" >> $GITHUB_ENV
 
-          # Lưu thread_ts vào PR comment ẩn
           gh api repos/${{ github.repository }}/issues/${{ github.event.issue.number }}/comments \
             -f body="<!-- slack-thread-ts:$ts -->"
         env:
@@ -65,36 +73,22 @@ jobs:
           SLACK_CHANNEL_ID: ${{ secrets.SLACK_CHANNEL_ID }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      # --- Khi Reviewer comment "comment ..."
+      # --- Khi Reviewer comment "comment ..." ---
       - name: Notify Reviewer Feedback
         if: github.event_name == 'issue_comment' && startsWith(github.event.comment.body, 'comment')
         run: |
-          # Parse Slack mapping từ secret
-          echo '${{ secrets.SLACK_USER_MAP }}' > usermap.json
+          source build_mentions.sh
 
-          # Lấy thread_ts từ PR comment ẩn
           ts=$(gh api repos/${{ github.repository }}/issues/${{ github.event.issue.number }}/comments \
             --jq '.[] | select(.body | contains("slack-thread-ts")) | .body' | \
             sed -n 's/.*slack-thread-ts:\(.*\)-->.*/\1/p' | tail -n1)
 
-          # Author PR
           pr_author="${{ github.event.issue.user.login }}"
-          author_id=$(jq -r --arg user "$pr_author" '.[$user]' usermap.json)
-
-          # Reviewer (người comment)
           reviewer="${{ github.event.comment.user.login }}"
-          reviewer_id=$(jq -r --arg user "$reviewer" '.[$user]' usermap.json)
+          assignees=$(gh api repos/${{ github.repository }}/issues/${{ github.event.issue.number }} --jq '.assignees[].login')
 
-          # Build mentions (giống flow ready)
-          mentions=""
-          if [ "$author_id" != "null" ]; then
-            mentions="$mentions <@$author_id>"
-          fi
-          if [ "$reviewer_id" != "null" ]; then
-            mentions="$mentions <@$reviewer_id>"
-          fi
+          mentions=$(build_mentions $pr_author $reviewer $assignees)
 
-          # Gửi reply vào thread
           curl -s -X POST \
             -H "Authorization: Bearer $SLACK_BOT_TOKEN" \
             -H 'Content-type: application/json' \
@@ -121,25 +115,17 @@ jobs:
       - name: Notify Merge
         if: github.event.pull_request.merged == true
         run: |
-          echo '${{ secrets.SLACK_USER_MAP }}' > usermap.json
+          source build_mentions.sh
 
           ts=$(gh api repos/${{ github.repository }}/issues/${{ github.event.pull_request.number }}/comments \
             --jq '.[] | select(.body | contains("slack-thread-ts")) | .body' | \
             sed -n 's/.*slack-thread-ts:\(.*\)-->.*/\1/p' | tail -n1)
 
-          merger="${{ github.event.pull_request.merged_by.login }}"
-          merger_id=$(jq -r --arg user "$merger" '.[$user]' usermap.json)
-
           pr_author="${{ github.event.pull_request.user.login }}"
-          author_id=$(jq -r --arg user "$pr_author" '.[$user]' usermap.json)
+          merger="${{ github.event.pull_request.merged_by.login }}"
+          assignees=$(gh api repos/${{ github.repository }}/issues/${{ github.event.pull_request.number }} --jq '.assignees[].login')
 
-          mentions="<!channel>"
-          if [ "$author_id" != "null" ]; then
-            mentions="$mentions <@$author_id>"
-          fi
-          if [ "$merger_id" != "null" ]; then
-            mentions="$mentions <@$merger_id>"
-          fi
+          mentions=$(build_mentions $pr_author $merger $assignees)
 
           curl -s -X POST \
             -H "Authorization: Bearer $SLACK_BOT_TOKEN" \
@@ -147,7 +133,7 @@ jobs:
             --data "{
               \"channel\": \"${SLACK_CHANNEL_ID}\",
               \"thread_ts\": \"$ts\",
-              \"text\": \"✅ PR merged! $mentions\",
+              \"text\": \"✅ PR merged! <!channel> $mentions\",
               \"blocks\": [
                 {
                   \"type\": \"section\",
