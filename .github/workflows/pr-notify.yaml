@@ -16,15 +16,13 @@ jobs:
       - name: Save Slack user map
         run: echo '${{ secrets.SLACK_USER_MAP }}' > usermap.json
 
-      # Helper script để build mentions
-      - name: Create build_mentions.sh
+      - name: Build helper
         run: |
           cat <<'EOF' > build_mentions.sh
           #!/usr/bin/env bash
           build_mentions() {
-            users=("$@")
             mentions=""
-            for u in "${users[@]}"; do
+            for u in "$@"; do
               slack_id=$(jq -r --arg user "$u" '.[$user]' usermap.json)
               if [ "$slack_id" != "null" ]; then
                 mentions="$mentions <@$slack_id>"
@@ -43,8 +41,7 @@ jobs:
         run: |
           source build_mentions.sh
 
-          body="${{ github.event.comment.body }}"
-          reviewers=$(echo "$body" | grep -o '@[a-zA-Z0-9._-]\+' | tr -d '@')
+          reviewers=$(echo "${{ github.event.comment.body }}" | grep -o '@[a-zA-Z0-9._-]\+' | tr -d '@')
           mentions=$(build_mentions $reviewers)
 
           ts=$(curl -s -X POST \
@@ -55,17 +52,17 @@ jobs:
               \"text\": \"👀 PR Ready for Review $mentions\",
               \"blocks\": [
                 {
+                  \"type\": \"header\",
+                  \"text\": {\"type\": \"plain_text\", \"text\": \"👀 PR Ready for Review\"}
+                },
+                {
                   \"type\": \"section\",
-                  \"text\": {
-                    \"type\": \"mrkdwn\",
-                    \"text\": \"*${{ github.event.issue.title }}*\nAuthor: ${{ github.event.comment.user.login }}\nReviewers: $mentions\n<${{ github.event.issue.html_url }}|View PR>\"
-                  }
+                  \"text\": {\"type\": \"mrkdwn\", \"text\": \"*${{ github.event.issue.title }}*\nAuthor: ${{ github.event.comment.user.login }}\nReviewers: $mentions\n<${{ github.event.issue.html_url }}|🔗 View PR>\"}
                 }
               ]
             }" https://slack.com/api/chat.postMessage | jq -r '.ts')
 
           echo "thread_ts=$ts" >> $GITHUB_ENV
-
           gh api repos/${{ github.repository }}/issues/${{ github.event.issue.number }}/comments \
             -f body="<!-- slack-thread-ts:$ts -->"
         env:
@@ -80,8 +77,7 @@ jobs:
           source build_mentions.sh
 
           ts=$(gh api repos/${{ github.repository }}/issues/${{ github.event.issue.number }}/comments \
-            --jq '.[] | select(.body | contains("slack-thread-ts")) | .body' | \
-            sed -n 's/.*slack-thread-ts:\(.*\)-->.*/\1/p' | tail -n1)
+            --jq '.[] | select(.body | contains("slack-thread-ts")) | .body' | sed -n 's/.*slack-thread-ts:\(.*\)-->.*/\1/p' | tail -n1)
 
           pr_author="${{ github.event.issue.user.login }}"
           reviewer="${{ github.event.comment.user.login }}"
@@ -95,14 +91,11 @@ jobs:
             --data "{
               \"channel\": \"${SLACK_CHANNEL_ID}\",
               \"thread_ts\": \"$ts\",
-              \"text\": \"💬 Review feedback from *$reviewer* $mentions\",
+              \"text\": \"💬 Review feedback from $reviewer $mentions\",
               \"blocks\": [
                 {
                   \"type\": \"section\",
-                  \"text\": {
-                    \"type\": \"mrkdwn\",
-                    \"text\": \"*$reviewer* commented:\n>>> ${{ github.event.comment.body }}\n$mentions\n<${{ github.event.comment.html_url }}|View Comment>\"
-                  }
+                  \"text\": {\"type\": \"mrkdwn\", \"text\": \"💬 *$reviewer* commented on the PR:\n>>> ${{ github.event.comment.body }}\n\n$mentions\n<${{ github.event.comment.html_url }}|🔗 View Comment>\"}
                 }
               ]
             }" https://slack.com/api/chat.postMessage
@@ -118,8 +111,7 @@ jobs:
           source build_mentions.sh
 
           ts=$(gh api repos/${{ github.repository }}/issues/${{ github.event.pull_request.number }}/comments \
-            --jq '.[] | select(.body | contains("slack-thread-ts")) | .body' | \
-            sed -n 's/.*slack-thread-ts:\(.*\)-->.*/\1/p' | tail -n1)
+            --jq '.[] | select(.body | contains("slack-thread-ts")) | .body' | sed -n 's/.*slack-thread-ts:\(.*\)-->.*/\1/p' | tail -n1)
 
           pr_author="${{ github.event.pull_request.user.login }}"
           merger="${{ github.event.pull_request.merged_by.login }}"
@@ -133,14 +125,15 @@ jobs:
             --data "{
               \"channel\": \"${SLACK_CHANNEL_ID}\",
               \"thread_ts\": \"$ts\",
-              \"text\": \"✅ PR merged! <!channel> $mentions\",
+              \"text\": \"✅ PR Merged! <!channel> $mentions\",
               \"blocks\": [
                 {
+                  \"type\": \"header\",
+                  \"text\": {\"type\": \"plain_text\", \"text\": \"✅ PR Merged\"}
+                },
+                {
                   \"type\": \"section\",
-                  \"text\": {
-                    \"type\": \"mrkdwn\",
-                    \"text\": \"*${{ github.event.pull_request.title }}* has been merged!\nAuthor: $pr_author\nMerged by: $merger\n$mentions\n<${{ github.event.pull_request.html_url }}|View PR>\"
-                  }
+                  \"text\": {\"type\": \"mrkdwn\", \"text\": \"*${{ github.event.pull_request.title }}* has been merged!\nAuthor: $pr_author\nMerged by: $merger\n\n$mentions\n<${{ github.event.pull_request.html_url }}|🔗 View PR>\"}
                 }
               ]
             }" https://slack.com/api/chat.postMessage
